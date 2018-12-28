@@ -17,9 +17,9 @@ package sexp
 import (
 	"github.com/badgerodon/peg"
 
-	"github.com/google/cayley/graph"
-	"github.com/google/cayley/graph/iterator"
-	"github.com/google/cayley/quad"
+	"github.com/cayleygraph/cayley/graph"
+	"github.com/cayleygraph/cayley/graph/iterator"
+	"github.com/cayleygraph/cayley/quad"
 )
 
 func BuildIteratorTreeForQuery(qs graph.QuadStore, query string) graph.Iterator {
@@ -197,8 +197,8 @@ func buildIteratorTree(tree *peg.ExpressionTree, qs graph.QuadStore) graph.Itera
 			if tree.Children[0].Children[0].Name == "ColonIdentifier" {
 				n = nodeID[1:]
 			}
-			fixed := qs.FixedIterator()
-			fixed.Add(qs.ValueOf(n))
+			fixed := iterator.NewFixed()
+			fixed.Add(qs.ValueOf(quad.Raw(n)))
 			out = fixed
 		}
 		return out
@@ -213,7 +213,7 @@ func buildIteratorTree(tree *peg.ExpressionTree, qs graph.QuadStore) graph.Itera
 		return lto
 	case "RootConstraint":
 		constraintCount := 0
-		and := iterator.NewAnd()
+		and := iterator.NewAnd(qs)
 		for _, c := range tree.Children {
 			switch c.Name {
 			case "NodeIdentifier":
@@ -232,7 +232,7 @@ func buildIteratorTree(tree *peg.ExpressionTree, qs graph.QuadStore) graph.Itera
 		var hasa *iterator.HasA
 		topLevelDir := quad.Subject
 		subItDir := quad.Object
-		subAnd := iterator.NewAnd()
+		subAnd := iterator.NewAnd(qs)
 		isOptional := false
 		for _, c := range tree.Children {
 			switch c.Name {
@@ -267,6 +267,6 @@ func buildIteratorTree(tree *peg.ExpressionTree, qs graph.QuadStore) graph.Itera
 		}
 		return hasa
 	default:
-		return &iterator.Null{}
+		return iterator.NewNull()
 	}
 }

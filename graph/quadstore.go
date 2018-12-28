@@ -22,29 +22,49 @@ package graph
 // quad backing store we prefer.
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"reflect"
 
-	"github.com/barakmich/glog"
-	"github.com/google/cayley/quad"
+	"github.com/cayleygraph/cayley/quad"
 )
 
-// Value defines an opaque "quad store value" type. However the backend wishes
-// to implement it, a Value is merely a token to a quad or a node that the
-// backing store itself understands, and the base iterators pass around.
-//
-// For example, in a very traditional, graphd-style graph, these are int64s
-// (guids of the primitives). In a very direct sort of graph, these could be
-// pointers to structs, or merely quads, or whatever works best for the
-// backing store.
-//
-// These must be comparable, or implement a `Key() interface{}` function
-// so that they may be stored in maps.
-type Value interface{}
+type BatchQuadStore interface {
+	ValuesOf(ctx context.Context, vals []Value) ([]quad.Value, error)
+	RefsOf(ctx context.Context, nodes []quad.Value) ([]Value, error)
+}
+
+func ValuesOf(ctx context.Context, qs QuadStore, vals []Value) ([]quad.Value, error) {
+	if bq, ok := qs.(BatchQuadStore); ok {
+		return bq.ValuesOf(ctx, vals)
+	}
+	out := make([]quad.Value, len(vals))
+	for i, v := range vals {
+		out[i] = qs.NameOf(v)
+	}
+	return out, nil
+}
+
+func RefsOf(ctx context.Context, qs QuadStore, nodes []quad.Value) ([]Value, error) {
+	if bq, ok := qs.(BatchQuadStore); ok {
+		return bq.RefsOf(ctx, nodes)
+	}
+	values := make([]Value, len(nodes))
+	for i, node := range nodes {
+		value := qs.ValueOf(node)
+		if value == nil {
+			return nil, fmt.Errorf("not found: %v", node)
+		}
+		values[i] = value
+	}
+	return values, nil
+}
 
 type QuadStore interface {
 	// The only way in is through building a transaction, which
 	// is done by a replication strategy.
-	ApplyDeltas([]Delta) error
+	ApplyDeltas(in []Delta, opts IgnoreOpts) error
 
 	// Given an opaque token, returns the quad for that token from the store.
 	Quad(Value) quad.Quad
@@ -61,19 +81,13 @@ type QuadStore interface {
 
 	// Given a node ID, return the opaque token used by the QuadStore
 	// to represent that id.
-	ValueOf(string) Value
+	ValueOf(quad.Value) Value
 
 	// Given an opaque token, return the node that it represents.
-	NameOf(Value) string
+	NameOf(Value) quad.Value
 
 	// Returns the number of quads currently stored.
 	Size() int64
-
-	// The last replicated transaction ID that this quadstore has verified.
-	Horizon() int64
-
-	// Creates a fixed iterator which can compare Values
-	FixedIterator() FixedIterator
 
 	// Optimize an iterator in the context of the quad store.
 	// Suppose we have a better index for the passed tree; this
@@ -83,7 +97,7 @@ type QuadStore interface {
 
 	// Close the quad store and clean up. (Flush to disk, cleanly
 	// sever connections, etc)
-	Close()
+	Close() error
 
 	// Convenience function for speed. Given a quad token and a direction
 	// return the node token for that direction. Sometimes, a QuadStore
@@ -99,97 +113,54 @@ type QuadStore interface {
 
 type Options map[string]interface{}
 
-func (d Options) IntKey(key string) (int, bool) {
+var (
+	typeInt = reflect.TypeOf(int(0))
+)
+
+func (d Options) IntKey(key string, def int) (int, error) {
 	if val, ok := d[key]; ok {
-		switch vv := val.(type) {
-		case float64:
-			return int(vv), true
-		default:
-			glog.Fatalln("Invalid", key, "parameter type from config.")
+		if reflect.TypeOf(val).ConvertibleTo(typeInt) {
+			i := reflect.ValueOf(val).Convert(typeInt).Int()
+			return int(i), nil
 		}
+
+		return def, fmt.Errorf("Invalid %s parameter type from config: %T", key, val)
 	}
-	return 0, false
+	return def, nil
 }
 
-func (d Options) StringKey(key string) (string, bool) {
+func (d Options) StringKey(key string, def string) (string, error) {
 	if val, ok := d[key]; ok {
-		switch vv := val.(type) {
-		case string:
-			return vv, true
-		default:
-			glog.Fatalln("Invalid", key, "parameter type from config.")
+		if v, ok := val.(string); ok {
+			return v, nil
 		}
+
+		return def, fmt.Errorf("Invalid %s parameter type from config: %T", key, val)
 	}
-	return "", false
+
+	return def, nil
 }
 
-func (d Options) BoolKey(key string) (bool, bool) {
+func (d Options) BoolKey(key string, def bool) (bool, error) {
 	if val, ok := d[key]; ok {
-		switch vv := val.(type) {
-		case bool:
-			return vv, true
-		default:
-			glog.Fatalln("Invalid", key, "parameter type from config.")
+		if v, ok := val.(bool); ok {
+			return v, nil
 		}
+
+		return def, fmt.Errorf("Invalid %s parameter type from config: %T", key, val)
 	}
-	return false, false
+
+	return def, nil
 }
 
-var ErrCannotBulkLoad = errors.New("quadstore: cannot bulk load")
+var (
+	ErrDatabaseExists = errors.New("quadstore: cannot init; database already exists")
+	ErrNotInitialized = errors.New("quadstore: not initialized")
+)
 
 type BulkLoader interface {
 	// BulkLoad loads Quads from a quad.Unmarshaler in bulk to the QuadStore.
 	// It returns ErrCannotBulkLoad if bulk loading is not possible. For example if
 	// you cannot load in bulk to a non-empty database, and the db is non-empty.
-	BulkLoad(quad.Unmarshaler) error
-}
-
-type NewStoreFunc func(string, Options) (QuadStore, error)
-type InitStoreFunc func(string, Options) error
-
-type register struct {
-	newFunc      NewStoreFunc
-	initFunc     InitStoreFunc
-	isPersistent bool
-}
-
-var storeRegistry = make(map[string]register)
-
-func RegisterQuadStore(name string, persists bool, newFunc NewStoreFunc, initFunc InitStoreFunc) {
-	if _, found := storeRegistry[name]; found {
-		panic("already registered QuadStore " + name)
-	}
-	storeRegistry[name] = register{
-		newFunc:      newFunc,
-		initFunc:     initFunc,
-		isPersistent: persists,
-	}
-}
-
-func NewQuadStore(name, dbpath string, opts Options) (QuadStore, error) {
-	r, registered := storeRegistry[name]
-	if !registered {
-		return nil, errors.New("quadstore: name '" + name + "' is not registered")
-	}
-	return r.newFunc(dbpath, opts)
-}
-
-func InitQuadStore(name, dbpath string, opts Options) error {
-	r, registered := storeRegistry[name]
-	if registered {
-		return r.initFunc(dbpath, opts)
-	}
-	return errors.New("quadstore: name '" + name + "' is not registered")
-}
-
-func IsPersistent(name string) bool {
-	return storeRegistry[name].isPersistent
-}
-
-func QuadStores() []string {
-	t := make([]string, 0, len(storeRegistry))
-	for n := range storeRegistry {
-		t = append(t, n)
-	}
-	return t
+	BulkLoad(quad.Reader) error
 }

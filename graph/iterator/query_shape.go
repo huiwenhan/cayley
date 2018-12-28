@@ -15,8 +15,10 @@
 package iterator
 
 import (
-	"github.com/google/cayley/graph"
-	"github.com/google/cayley/quad"
+	"context"
+
+	"github.com/cayleygraph/cayley/graph"
+	"github.com/cayleygraph/cayley/quad"
 )
 
 type Node struct {
@@ -129,8 +131,8 @@ func (s *queryShape) MakeNode(it graph.Iterator) *Node {
 		}
 	case graph.Fixed:
 		n.IsFixed = true
-		for graph.Next(it) {
-			n.Values = append(n.Values, s.qs.NameOf(it.Result()))
+		for it.Next(context.TODO()) {
+			n.Values = append(n.Values, s.qs.NameOf(it.Result()).String())
 		}
 	case graph.HasA:
 		hasa := it.(*HasA)

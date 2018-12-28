@@ -15,11 +15,8 @@
 package writer
 
 import (
-	"sync"
-	"time"
-
-	"github.com/google/cayley/graph"
-	"github.com/google/cayley/quad"
+	"github.com/cayleygraph/cayley/graph"
+	"github.com/cayleygraph/cayley/quad"
 )
 
 func init() {
@@ -27,65 +24,96 @@ func init() {
 }
 
 type Single struct {
-	nextID int64
-	qs     graph.QuadStore
-	mut    sync.Mutex
+	qs         graph.QuadStore
+	ignoreOpts graph.IgnoreOpts
+}
+
+func NewSingle(qs graph.QuadStore, opts graph.IgnoreOpts) (graph.QuadWriter, error) {
+	return &Single{
+		qs:         qs,
+		ignoreOpts: opts,
+	}, nil
 }
 
 func NewSingleReplication(qs graph.QuadStore, opts graph.Options) (graph.QuadWriter, error) {
-	horizon := qs.Horizon()
-	rep := &Single{nextID: horizon + 1, qs: qs}
-	if horizon <= 0 {
-		rep.nextID = 1
+	ignoreMissing, err := opts.BoolKey("ignore_missing", graph.IgnoreMissing)
+	if err != nil {
+		return nil, err
 	}
-	return rep, nil
-}
 
-func (s *Single) AcquireNextID() int64 {
-	s.mut.Lock()
-	defer s.mut.Unlock()
-	id := s.nextID
-	s.nextID++
-	return id
+	ignoreDuplicate, err := opts.BoolKey("ignore_duplicate", graph.IgnoreDuplicates)
+	if err != nil {
+		return nil, err
+	}
+
+	return NewSingle(qs, graph.IgnoreOpts{
+		IgnoreMissing: ignoreMissing,
+		IgnoreDup:     ignoreDuplicate,
+	})
 }
 
 func (s *Single) AddQuad(q quad.Quad) error {
 	deltas := make([]graph.Delta, 1)
 	deltas[0] = graph.Delta{
-		ID:        s.AcquireNextID(),
-		Quad:      q,
-		Action:    graph.Add,
-		Timestamp: time.Now(),
+		Quad:   q,
+		Action: graph.Add,
 	}
-	return s.qs.ApplyDeltas(deltas)
+	return s.qs.ApplyDeltas(deltas, s.ignoreOpts)
 }
 
 func (s *Single) AddQuadSet(set []quad.Quad) error {
-	deltas := make([]graph.Delta, len(set))
-	for i, q := range set {
-		deltas[i] = graph.Delta{
-			ID:        s.AcquireNextID(),
-			Quad:      q,
-			Action:    graph.Add,
-			Timestamp: time.Now(),
-		}
+	tx := graph.NewTransactionN(len(set))
+	for _, q := range set {
+		tx.AddQuad(q)
 	}
-	s.qs.ApplyDeltas(deltas)
-	return nil
+	return s.qs.ApplyDeltas(tx.Deltas, s.ignoreOpts)
 }
 
 func (s *Single) RemoveQuad(q quad.Quad) error {
 	deltas := make([]graph.Delta, 1)
 	deltas[0] = graph.Delta{
-		ID:        s.AcquireNextID(),
-		Quad:      q,
-		Action:    graph.Delete,
-		Timestamp: time.Now(),
+		Quad:   q,
+		Action: graph.Delete,
 	}
-	return s.qs.ApplyDeltas(deltas)
+	return s.qs.ApplyDeltas(deltas, s.ignoreOpts)
+}
+
+// RemoveNode removes all quads with the given value.
+//
+// It returns ErrNodeNotExists if node is missing.
+func (s *Single) RemoveNode(v quad.Value) error {
+	gv := s.qs.ValueOf(v)
+	if gv == nil {
+		return graph.ErrNodeNotExists
+	}
+	del := graph.NewRemover(s)
+	defer del.Close()
+
+	total := 0
+	// TODO(dennwc): QuadStore may remove node without iterations. Consider optional interface for this.
+	for _, d := range []quad.Direction{quad.Subject, quad.Predicate, quad.Object, quad.Label} {
+		r := graph.NewResultReader(s.qs, s.qs.QuadIterator(d, gv))
+		n, err := quad.Copy(del, r)
+		r.Close()
+		if err != nil {
+			return err
+		}
+		total += n
+	}
+	if err := del.Flush(); err != nil {
+		return err
+	}
+	if total == 0 {
+		return graph.ErrNodeNotExists
+	}
+	return nil
 }
 
 func (s *Single) Close() error {
 	// Nothing to clean up locally.
 	return nil
+}
+
+func (s *Single) ApplyTransaction(t *graph.Transaction) error {
+	return s.qs.ApplyDeltas(t.Deltas, s.ignoreOpts)
 }

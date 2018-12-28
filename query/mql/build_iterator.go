@@ -17,18 +17,17 @@ package mql
 import (
 	"errors"
 	"fmt"
-	"log"
 	"math"
 	"strings"
 
-	"github.com/google/cayley/graph"
-	"github.com/google/cayley/graph/iterator"
-	"github.com/google/cayley/quad"
+	"github.com/cayleygraph/cayley/graph"
+	"github.com/cayleygraph/cayley/graph/iterator"
+	"github.com/cayleygraph/cayley/quad"
 )
 
 func (q *Query) buildFixed(s string) graph.Iterator {
-	f := q.ses.qs.FixedIterator()
-	f.Add(q.ses.qs.ValueOf(s))
+	f := iterator.NewFixed()
+	f.Add(q.ses.qs.ValueOf(quad.StringToValue(s)))
 	return f
 }
 
@@ -93,7 +92,7 @@ func (q *Query) buildIteratorTreeInternal(query interface{}, path Path) (it grap
 		it = q.buildResultIterator(path)
 		optional = true
 	default:
-		log.Fatal("Unknown JSON type?", query)
+		err = fmt.Errorf("Unknown JSON type: %T", query)
 	}
 	if err != nil {
 		return nil, false, err
@@ -103,7 +102,7 @@ func (q *Query) buildIteratorTreeInternal(query interface{}, path Path) (it grap
 }
 
 func (q *Query) buildIteratorTreeMapInternal(query map[string]interface{}, path Path) (graph.Iterator, error) {
-	it := iterator.NewAnd()
+	it := iterator.NewAnd(q.ses.qs)
 	it.AddSubIterator(q.ses.qs.NodesAllIterator())
 	var err error
 	err = nil
@@ -137,9 +136,9 @@ func (q *Query) buildIteratorTreeMapInternal(query map[string]interface{}, path 
 			if err != nil {
 				return nil, err
 			}
-			subAnd := iterator.NewAnd()
-			predFixed := q.ses.qs.FixedIterator()
-			predFixed.Add(q.ses.qs.ValueOf(pred))
+			subAnd := iterator.NewAnd(q.ses.qs)
+			predFixed := iterator.NewFixed()
+			predFixed.Add(q.ses.qs.ValueOf(quad.StringToValue(pred)))
 			subAnd.AddSubIterator(iterator.NewLinksTo(q.ses.qs, predFixed, quad.Predicate))
 			if reverse {
 				lto := iterator.NewLinksTo(q.ses.qs, builtIt, quad.Subject)
